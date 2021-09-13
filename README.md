@@ -13,4 +13,5 @@ Drawbacks:
 - Does not have floating point functionality.
 
 Extra:
-- %p prints all bytes including 0s because it is a memory location and all digits are significant.
+- p conversion specifier prints all bytes including 0s because it is a memory location and all digits are significant. The C89 standard printf says that this is up to the implementation.
+- z and t length modifiers are extensions to the original C89 printf.
