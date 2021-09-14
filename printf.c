@@ -400,7 +400,7 @@ main(int argc, char *argv[])
 	kprintf((void (*)(int)) putchar, "%%16s: %-16s|\n", "beef");
 	printf("%%16s: %-16s|\n", "beef");
 	kprintf((void (*)(int)) putchar, "%%2s: %-2s|\n", "beef");
-	printf("%%2s: %-2s| (glibc produces non compliant behaviour)\n", "beef");
+	printf("%%2s: %-2s|\n", "beef");
 
 	kprintf((void (*)(int)) putchar, "%%d: %d|\n", -1234);
 	printf("%%d: %d|\n", -1234);
