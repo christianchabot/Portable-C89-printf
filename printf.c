@@ -18,8 +18,8 @@
 #define NBPRINTBUFDEC ((CHAR_BIT/10 + 1)*sizeof(union value))
 #endif
 
-/* Length */
-enum {INT, CHAR, SHORT, LONG, VOID, SIZE_T, PTRDIFF_T};
+/* Lengths. */
+enum {INT, CHAR, SHORT, LONG, VOID, SIZE_T, PTRDIFF_T, UNDEFINED = 0};
 
 union value {
 	unsigned int i;
@@ -31,26 +31,28 @@ union value {
 	ptrdiff_t t;
 };
 
-/* Base */
+/* Base's */
 enum {STR, DEC, OCT, HEX}; 
 
 struct flag {
-	unsigned int base   : 2; /* hex, oct, dec, or str? */
+	unsigned int base   : 2; /* hex, oct, or dec? */
 	unsigned int len    : 3; /* hh, h, l, z, t, or p? */
 	unsigned int zero   : 1; /* 0 flag set? */
-	unsigned int plus   : 1; /* + flag set? */
-	unsigned int nums   : 1; /* # flag set? */
 	unsigned int minus  : 1; /* - flag set? */
+	unsigned int plus   : 1; /* + flag set? */
+	unsigned int space  : 1; /* space flag set? */
+	unsigned int nums   : 1; /* # flag set? */
 	unsigned int low    : 1; /* Lowercase? */
-	unsigned int wflag  : 1; /* Is width set? */
+	unsigned int pflag  : 1; /* Is precision set? */
 	unsigned int unsign : 1; /* Is it unsigned? */
 	unsigned int sign   : 1; /* Is the value negative? */
 	unsigned int width;
+	unsigned int prec;
 };
 
 static const char *digit = "0123456789ABCDEF0123456789abcdef"; 
 static const struct {
-	unsigned int boff;
+	unsigned int soff;
 	unsigned int eoff;
 } ltab[8] = {
 	{offsetof(union value, i), sizeof(unsigned int)},
@@ -77,11 +79,10 @@ static const struct {
 static char *
 printdec(char buf[NBPRINTBUFDEC + 1], union value *val, struct flag *flags)
 {
-	const unsigned char *srt = (const unsigned char *) val + ltab[flags->len].boff, *end;
+	const unsigned char *srt = (const unsigned char *) val + ltab[flags->len].soff, *end;
 	unsigned long dec = 0;
 	unsigned char *tmp = (unsigned char *) &dec;
 
-	/* Copy the value into a long so we can perform arithmetic on it. */
 	for (end = srt + ltab[flags->len].eoff; srt < end; ++srt)
 		*tmp++ = *srt;
 
@@ -100,7 +101,7 @@ printdec(char buf[NBPRINTBUFDEC + 1], union value *val, struct flag *flags)
 static char *
 printhexoct(char buf[NBPRINTBUF], union value *val, struct flag *flags)
 {
-	unsigned char *srt = (unsigned char *) val + ltab[flags->len].boff, *end;
+	unsigned char *srt = (unsigned char *) val + ltab[flags->len].soff, *end;
 	unsigned int upper = flags->low << 4, base = flags->base == HEX;
 
 	/* Ignore leading 0 bytes. */
@@ -138,67 +139,81 @@ printhexoct(char buf[NBPRINTBUF], union value *val, struct flag *flags)
 		*srt >>= calcs[base].shft;
 	} while (*srt);
 
-	/* Print format of # flag. */
-	if (flags->nums) {
-		const char *nums = !base + flags->low ? "x0" : "X0";
-		if (base || *(buf - 1) != '0')
-			while (*nums)
-				*buf++ = *nums++;
-	}
-
 	return buf;
 }
 
 static void
 print(void (*putc) (int), void *val, struct flag *flags)
 {
+	const char *nstr = "0X0x", *estr = nstr + sizeof(char);
 	char buf[NBPRINTBUF], *end, *srt;
-	unsigned pad = 0;
-	int incr = 0;
+	unsigned pad, prec, nums = 0;
 
 	switch (flags->base) {
 	case STR:
 		if (!(srt = val))
-			srt = "(null)";
+			srt = "(NULL)";
 
 		end = srt + strlen(srt);
+		if (flags->pflag && flags->prec < end - srt)
+			end = srt + flags->prec;
 		break;
 	case HEX:
+		estr += sizeof(char);
+		if (flags->low) {
+			nstr += sizeof("0X") - sizeof(char);
+			estr += sizeof("0X") - sizeof(char);
+		}
 	case OCT:
 		end = printhexoct(srt = buf, val, flags);
+		nums = estr - nstr;
 		break;
 	case DEC:
 		end = printdec(srt = buf, val, flags);
-		if (flags->sign && flags->plus)
-			*end++ = '+';
+		if (!flags->unsign && flags->sign || flags->plus || flags->space) {
+			nstr = flags->plus ? "+" : flags->space ? " " : "-";
+			estr = nstr + sizeof(char);
+			nums = nstr - estr;
+		}
 	}
 
-	/* Calculate padding. */
-	if (flags->wflag)
-		if (flags->width > end - srt)
-			pad = flags->width - (end - srt);
-		else if(!flags->base)
-			end = srt + flags->width;
-	flags->width = end - srt; /* Amount to print. */
+	/* Corner case: value is 0 and precision is 0 (do not print anything). */
+	if (flags->base && !flags->nums)
+		if (flags->pflag)
+			if (!flags->prec && end - srt <= 1 && *srt == '0')
+				end = srt;
 
-	if (!flags->minus) {
-		int pbyte = !flags->nums && flags->zero && flags->base != 0 ? '0' : ' ';
-		for (; pad; --pad)
+	prec = flags->prec > end - srt ? flags->prec - (end - srt) : 0;
+	pad = flags->width > end - srt + prec + nums ? flags->width - (end - srt + prec + nums) : 0;
+	if (pad && !flags->minus) {
+		int pbyte = !flags->nums && flags->zero && flags->base ? '0' : ' ';
+		do {
 			putc(pbyte);
+		} while (--pad);
 	}
 
-	if (flags->base) {
-		srt = end - 1;
-		incr = -1;
-	} else
-		incr = 1;
+	/* print -, +, 0x, or 0 */
+	if (nums)
+		if (end - srt > 1 || *srt != '0' || flags->plus || flags->space)
+			while (nstr < estr)
+				putc(*nstr++);
 
-	for (; flags->width; --flags->width, srt += incr)
-		putc(*srt);
+	/* Corner case: ignore precision if negative. */
+	if (!flags->minus || flags->width)
+		for (; prec; --prec)
+			putc('0');
 
-	if (flags->minus)
-		for (; pad; --pad)
+	if (flags->base)
+		while (end > srt)
+			putc(*--end);
+	else
+		for (; srt < end; ++srt)
+			putc(*srt);
+
+	if (pad && flags->minus)
+		do {
 			putc(' ');
+		} while (--pad);
 }
 
 static void
@@ -220,31 +235,58 @@ kvprintf(void (*putc) (int), const char *fmt, va_list ap)
 	flag:
 		switch (*++fmt) {
 		case '0':
-			flags.zero = 1;
+			if (!flags.minus)
+				flags.zero = 1;
+			goto flag;
+		case '-':
+			flags.minus = 1;
+			flags.zero = 0;
+			goto flag;
+		case ' ':
+			if (!flags.plus)
+				flags.space = 1;
 			goto flag;
 		case '+':
 			flags.plus = 1;
+			flags.space = 0;
 			goto flag;
 		case '#':
 			flags.nums = 1;
 			goto flag;
-		case '-':
-			flags.minus = 1;
-			goto flag;
-		case ' ':
-			flags.zero = 0;
-			goto flag;
 		}
 
+		/* Width */
+		if (*fmt == '*') {
+			flags.width = (unsigned int) va_arg(ap, int);
+			++fmt;
+		} else
 	width:
 		switch (*fmt) {
 		case '0': case '1': case '2': case '3': case '4':
 		case '5': case '6': case '7': case '8': case '9':
-			flags.wflag = 1;
 			flags.width = ((flags.width << 2) + flags.width << 1);
 			flags.width += *fmt++ - '0';
 			if (flags.width <= 256)
 				goto width;
+		}
+
+		/* Precision */
+		if (*fmt == '.') {
+			flags.pflag = 1;
+
+			if (*++fmt == '*') {
+				flags.prec = (unsigned int) va_arg(ap, int);
+				++fmt;
+			} else	
+		precision:
+				switch (*fmt) {
+				case '0': case '1': case '2': case '3': case '4':
+				case '5': case '6': case '7': case '8': case '9':
+					flags.prec = ((flags.prec << 2) + flags.prec << 1);
+					flags.prec += *fmt++ - '0';
+					if (flags.prec <= 256)
+						goto precision;
+				}
 		}
 
 		/* Length */
@@ -274,19 +316,19 @@ kvprintf(void (*putc) (int), const char *fmt, va_list ap)
 		/* Conversion specifier */
 		switch (*fmt) {
 		case 'p':
-			if (flags.zero || flags.plus || flags.nums || flags.minus || flags.len || flags.wflag)
+			if (flags.zero || flags.plus || flags.nums || flags.minus || flags.len || flags.pflag || flags.width)
 				break;
 
+			flags.nums = 1;
 			flags.len = VOID;
-			flags.zero = 1;
-			flags.wflag = 1;
-			//flags.width = sizeof(void *) << 1;
 		case 'x':
 			flags.low = 1;
 		case 'X':
 			flags.base = 1;
 		case 'o':
 			flags.base += 1;
+			if (flags.plus)
+				break;
 		case 'u':
 			flags.unsign = 1;
 		case 'i':
@@ -333,11 +375,11 @@ kvprintf(void (*putc) (int), const char *fmt, va_list ap)
 			if (flags.zero || flags.plus || flags.nums || flags.len)
 				break;
 
-			str = (const char *) va_arg(ap, const char *);
+			str = va_arg(ap, const char *);
 			print(putc, (void *) str, &flags);
 			break;
 		case '%':
-			if (flags.zero || flags.plus || flags.nums || flags.minus || flags.len || flags.wflag)
+			if (flags.zero || flags.plus || flags.nums || flags.minus || flags.len || flags.pflag)
 				break;
 
 			putc('%');
@@ -363,62 +405,36 @@ kprintf(void (*putc) (int), const char *fmt, ...)
 int
 main(int argc, char *argv[])
 {
-	printf("NBPRINTBUFDEC: %lu\n", (unsigned long) NBPRINTBUFDEC);
+	int tmp = 0xbeef;
+	kprintf((void (*)(int)) putchar, "%%+.d: %+.d|\n", 0);
+	printf("%%+.d: %+.d|\n", 0);
+	kprintf((void (*)(int)) putchar, "%%.0d: %.0d|\n", 0);
+	printf("%%.0d: %.0d|\n", 0);
+	kprintf((void (*)(int)) putchar, "%%+.d: %+.d|\n", 1);
+	printf("%%+.d: %+.d|\n", 1);
+	kprintf((void (*)(int)) putchar, "%%+.d: %+.d|\n", tmp);
+	printf("%%+.d: %+.d|\n", tmp);
+	kprintf((void (*)(int)) putchar, "%%2.8d: %2.8d|\n", tmp);
+	printf("%%2.8d: %2.8d|\n", tmp);
+	kprintf((void (*)(int)) putchar, "%%-.8d: %-.8d|\n", tmp);
+	printf("%%-.8d: %-.8d| (glibc produces incorrect output?)\n", tmp);
 
-	kprintf((void (*)(int)) putchar, "%%x %x|\n", 0xdead);
-	printf("%%x %x|\n", 0xdead);
-	kprintf((void (*)(int)) putchar, "%%x %x|\n", 0x0);
-	printf("%%x %x|\n", 0x0);
-	kprintf((void (*)(int)) putchar, "%%x %x|\n", 0xdbeef);
-	printf("%%x %x|\n", 0xdbeef);
+	kprintf((void (*)(int)) putchar, "%%p: %p| (implementation defined)\n", NULL);
+	printf("%%p: %p| (implementation defined)\n", NULL);
+	kprintf((void (*)(int)) putchar, "%%p: %p| (implementation defined)\n", &tmp);
+	printf("%%p: %p| (implementation defined)\n", &tmp);
 
-	kprintf((void (*)(int)) putchar, "%%X %X|\n", 0xdeadbeef);
-	printf("%%X %X|\n", 0xdeadbeef);
-	kprintf((void (*)(int)) putchar, "%%X %X|\n", 0xff);
-	printf("%%X %X|\n", 0xff);
+	kprintf((void (*)(int)) putchar, "%%#*.*x: %#*.*x|\n", 12, 8, tmp);
+	printf("%%#*.*x: %#*.*x|\n", 12, 8, tmp);
+	kprintf((void (*)(int)) putchar, "%%#.3X: %#.3X|\n", tmp);
+	printf("%%#.3X: %#.3X|\n", tmp);
 
-	kprintf((void (*)(int)) putchar, "%%p %p|\n", (void *) 0xbeef);
-	printf("%%p %p|\n", (void *) 0xbeef);
+	kprintf((void (*)(int)) putchar, "%%#o: %#o|\n", 0);
+	printf("%%#o: %#o|\n", 0);
+	kprintf((void (*)(int)) putchar, "%%#o: %#o|\n", 7);
+	printf("%%#o: %#o|\n", 7);
+	kprintf((void (*)(int)) putchar, "%%-10o: %-10o|\n", tmp);
+	printf("%%-10o: %-10o|\n", tmp);
 
-	kprintf((void (*)(int)) putchar, "%%o %o|\n", 0xf);
-	printf("%%o %o|\n", 0xf);
-	kprintf((void (*)(int)) putchar, "%%o %o|\n", 0xdeadbeef);
-	printf("%%o %o|\n", 0xdeadbeef);
-	kprintf((void (*)(int)) putchar, "%%o %o|\n", 0);
-	printf("%%o %o|\n", 0);
-	kprintf((void (*)(int)) putchar, "%%o %o|\n", 7);
-	printf("%%o %o|\n", 7);
-
-	kprintf((void (*)(int)) putchar, "%%-8s: %-8s|\n", "beef");
-	printf("%%-8s: %-8s|\n", "beef");
-	kprintf((void (*)(int)) putchar, "%%-8s: %-8s|\n", "");
-	printf("%%-8s: %-8s|\n", "");
-	kprintf((void (*)(int)) putchar, "%%s: %s|\n", (const char *) NULL);
-	printf("%%s: %s|\n", (const char *) NULL);
-	kprintf((void (*)(int)) putchar, "%%256s: %256s|\n", "beef");
-	printf("%%256s: %256s|\n", "beef");
-	kprintf((void (*)(int)) putchar, "%%16s: %-16s|\n", "beef");
-	printf("%%16s: %-16s|\n", "beef");
-	kprintf((void (*)(int)) putchar, "%%2s: %-2s|\n", "beef");
-	printf("%%2s: %-2s|\n", "beef");
-
-	kprintf((void (*)(int)) putchar, "%%d: %d|\n", -1234);
-	printf("%%d: %d|\n", -1234);
-
-	kprintf((void (*)(int)) putchar, "%%u: %u|\n", -1234);
-	printf("%%u: %u|\n", -1234);
-
-	kprintf((void (*)(int)) putchar, "%%0i: %0i|\n", 0);
-	printf("%%0i: %0i|\n", 0);
-
-	kprintf((void (*)(int)) putchar, "%%#08X: %#08X|\n", 0xdead);
-	printf("%%#08X: %#08X|\n", 0xdead);
-	kprintf((void (*)(int)) putchar, "%%-#08X: %-#08X|\n", 0xcfee1);
-	printf("%%-#08X: %-#08X|\n", 0xcfee1);
-	kprintf((void (*)(int)) putchar, "%%# 8X: %# 8x|\n", 0xefff3);
-	kprintf((void (*)(int)) putchar, "%%# 8X: %# 8x|\n", 0xefff3);
-
-	kprintf((void (*)(int)) putchar, "%%: %%\n");
-	printf("%%: %%\n");
 	return 0;
 }
